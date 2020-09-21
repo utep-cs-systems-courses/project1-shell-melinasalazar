@@ -8,70 +8,85 @@
 
 #! /usr/bin/env  python3
 
-import re       # regular expression tools
-import sys      # command line arguments
-import os       # interacting with the operating system
+import re  # regular expression tools
+import sys  # command line arguments
+import os  # interacting with the operating system
 
 
 def fork(args):
     pid = os.getpid()  # get and remember pid
-    rc = os.fork()  # set rc to fork
+    rc = os.fork()     # set rc to fork
+    stby = True
+
+    # handle background tasks
+    if "&" in args:
+        args.remove("&")
+        stby = False
 
     if rc < 0:  # capture error during fork
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
+        os.write(2, ("Fork failed, returning %d\n" % rc).encode())
         sys.exit(1)
 
-    elif rc == 0:  # child
-        for dir in re.split(":", os.environ['PATH']):  # check for environment variables
-            program = "%s/%s" % (dir, args[0])
-            try:
-                os.execve(program, args, os.environ)
-            except FileNotFoundError:
-                pass                                   #fail quietly
+    elif rc == 0:  # child process
+
+        if ">" in args or "<" in args:
+            redirection(args)
+        else:
+            for dir in re.split(":", os.environ['PATH']):  # check for environment variables
+                program = "%s/%s" % (dir, args[0])
+                try:
+                    os.execve(program, args, os.environ)
+                except FileNotFoundError:
+                    pass  # fail quietly
 
         os.write(2, ("%s: command not found\n" % args[0]).encode())  # if command not found print error
         sys.exit(1)
 
     else:
-        childPid = os.wait()  # wait for child to fork
+        if stby:
+            childPid = os.wait()  # wait for child to fork. childPid[0] = teminated child's process child[1] = exit sta
+            if childPid[1] != 0 and childPid[1] != 256:
+                os.write(2, ("Program terminated with exit code: %d\n" % childPid[1]).encode())
 
 
-def redirectIn(args):
-    pid = os.getpid()  # get pid
+def redirection(args):
+    # 1 output >
+    if ">" in args:
+        fileIndex = args.index('>') + 1  # Check for index of output
+        fileName = args[fileIndex]       # Command name
+        os.close(1)
+        os.open(fileName, os.O_CREAT | os.O_WRONLY)
+        os.set_inheritable(1, True)
+        args.remove(fileName)
+        args.remove('>')
 
-    rc = os.fork()  # ready to fork
-
-    if rc < 0:  # return error message if fork fails
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
-
-    elif rc == 0:
-        del args[1]
-        fd = sys.stdout.fileno()  # set file descriptor output
-
-        try:
-            os.execve(args[0], args, os.environ)  # execute program
-        except FileNotFoundError:
-            pass
-        for dir in re.split(":", os.environ['PATH']):  # check for environment variables
-            program = "%s/%s" % (dir, args[0])
-            try:
-                os.execve(program, args, os.environ)
-            except FileNotFoundError:
-                pass
-        os.write(2, ("%s: command not found\n" % args[0]).encode())  # if the command was not found return error
-        sys.exit(1)
-
+    # 0 input '<'
     else:
-        childPid = os.wait()
+        fileIndex = args.index('<') + 1  # Check for index of output
+        fileName = args[fileIndex]  #
+        os.close(0)
+        os.open(fileName, os.O_RDONLY)
+        os.set_inheritable(0, True)
+        args.remove(fileName)
+        args.remove('<')
+
+    for dir in re.split(":", os.environ["PATH"]):  # try each directory in the path
+        program = "%s/%s" % (dir, args[0])
+        try:
+            os.execve(program, args, os.environ)  # try to exec program
+        except FileNotFoundError:  # ...expected
+            pass  # ...fail quietly
+
+    os.write(2, ("command %s not found \n" % (args[0])).encode())
+    sys.exit(1)  # terminate with error
 
 
 def pipe(args):
-    pid = os.getpid()  # get pid
+    pid = os.getpid()  # get and remember pid
 
-    pipe = args.index("|")  # check for pipe in command
+    pipe = args.index("|")  # check for pipe in command, returns index of pipe symbol
 
-    pr, pw = os.pipe()  # pipe read(input) pipe write(output)
+    pr, pw = os.pipe()  # Create a pipe, 'pr' pipe read(input), 'pw' pipe write(output)
     for f in (pr, pw):
         os.set_inheritable(f, True)
 
@@ -82,10 +97,8 @@ def pipe(args):
         sys.exit(1)
 
     elif rc == 0:  # write to pipe from child
-        args = args[:pipe]
-
-        os.close(1)
-
+        args = args[:pipe]  # left pipe
+        os.close(1)  # redirect child's stdout
         fd = os.dup(pw)  # duplicate file descriptor output
         os.set_inheritable(fd, True)
         for fd in (pr, pw):
@@ -107,9 +120,7 @@ def pipe(args):
 
     else:
         args = args[pipe + 1:]
-
         os.close(0)
-
         fd = os.dup(pr)  # duplicate file descriptor for output
         os.set_inheritable(fd, True)
         for fd in (pw, pr):
@@ -129,77 +140,31 @@ def pipe(args):
                     pass
 
         os.write(2, ("%s: command not found\n" % args[0]).encode())  # return error if command was not found
-
         sys.exit(1)
-        
-
-def redirectOut(args):
-    fileIndex = args.index('>') + 1  # check for index of ouput '>'
-    fileName = args[fileIndex]  # array index from user input
-
-    args = args[:fileIndex - 1]
-
-    pid = os.getpid()  # get pid
-
-    rc = os.fork()  # ready to fork
-
-    if rc < 0:
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
-
-    elif rc == 0:
-        os.close(1)
-        sys.stdout = open(fileName, "w")  # open and write to output
-        os.set_inheritable(1, True)
-
-        if os.path.isfile(args[0]):
-            try:
-                os.execve(args[0], args, os.environ)
-            except FileNotFoundError:
-                pass
-            else:
-                for dir in re.split(":", os.environ['PATH']):  # check for environment variables
-                    program = "%s/%s" % (dir, args[0])
-                    try:
-                        os.execve(args[0], args, os.environ)
-                    except FileNotFoundError:
-                        pass
-
-                os.write(2, ("%s: command not found\n" % args[0]).encode())
-                sys.exit(1)
-    else:
-        childPid = os.wait()
 
 
 while True:
-    
-    if 'PS1' in os.environ:  # check if the variable PS1 is set
+
+    if 'PS1' in os.environ:      # check if the variable PS1 is set
         os.write(1, (os.environ['PS1']).encode())
-    try:
-        userInput = input()  # Get user input
-    except EOFError:
-        sys.exit(1)
-    except ValueError:
-        sys.exit(1)
-    else:
-        os.write(1, '$'.encode())
 
-    args = userInput.split()  # Split user input into array
+    userInput = os.read(0, 256)  # Get user input. 0 = standrd input (keyboard) 256 bytes to read
 
-    if "exit" in userInput:  # Exit command
+    args = userInput.decode().split()  # Split user input into array
+
+    if "exit" in args:  # Exit command
         sys.exit(0)
-
-    elif "cd" in args[0]:  # Change directories
+    if not args:
+        continue
+    elif "cd" in args[0]:  # Change directory
         try:
-            os.chdir(args[1])  # change directory
+            os.chdir(args[1])
+        except IndexError:
+            os.write(1, " Error: Please provide a directory".encode())
         except FileNotFoundError:
             os.write(1, ("cd: %s: No such file or directory\n" % args[1]).encode())
             pass
-    elif "|" in userInput:  # Handle pipe
+    elif "|" in args:  # Handle pipe
         pipe(args)
-    elif ">" in userInput:  # Manage redirection output
-        redirectOut(args)
-    elif "<" in userInput:  # Manage redirection input
-        redirectIn(args)
     else:
-        fork(args)          # Manage commands
+        fork(args)  # Manage commands
